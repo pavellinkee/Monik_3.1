@@ -1,0 +1,249 @@
+# Monik — пример конфигурации.
+#
+# ВНИМАНИЕ: реальные секреты в этот файл не помещаются никогда.
+# Credentials задаются ссылками на environment variables ({ env: "MONIK_..." })
+# и разрешаются только Configuration subsystem (17_CONFIGURATION.md §5, §26, §46).
+#
+# Любой параметр можно переопределить переменной окружения с префиксом MONIK__,
+# где путь внутри документа разделяется двойным подчёркиванием. Например:
+#   MONIK__SCANNER__LEVEL1__INTERVAL_SECONDS=60
+#   MONIK__APPLICATION__ENVIRONMENT=production
+# Приоритет: environment override > этот файл > безопасный default.
+
+application:
+  environment: development        # development | test | production
+  timezone: "Europe/Lisbon"
+  shutdown_timeout_seconds: 30
+
+networks:
+  - network_id: polygon
+    name: Polygon
+    chain_id: 137
+    native_token_symbol: POL
+    native_token_decimals: 18
+    wrapped_native_address: "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"
+    rpc_url: "https://polygon-rpc.com"
+    enabled: true
+
+# Провайдер включается только вместе с заданной переменной окружения
+# для его ключа: enabled-провайдер без доступного секрета останавливает старт.
+providers:
+  - provider_id: oneinch
+    enabled: true
+    api_key: { env: "MONIK_ONEINCH_API_KEY" }
+    supported_networks: [polygon]
+    request_timeout_seconds: 10.0
+    max_concurrent_requests: 4
+    requests_per_second: 5.0
+
+  - provider_id: zero_x
+    enabled: true
+    api_key: { env: "MONIK_ZEROX_API_KEY" }
+    supported_networks: [polygon]
+
+  - provider_id: velora
+    enabled: false
+    api_key: { env: "MONIK_VELORA_API_KEY" }
+    supported_networks: [polygon]
+
+  - provider_id: uniswap
+    enabled: false
+    api_key: { env: "MONIK_UNISWAP_API_KEY" }
+    supported_networks: [polygon]
+
+# Token universe. Authoritative metadata живёт в Token Registry, здесь
+# задаётся разрешённый набор. decimals указывается явно и не выводится
+# из символа (01_PROJECT_REQUIREMENTS.md §10).
+tokens:
+  - network_id: polygon
+    address: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
+    symbol: USDT
+    decimals: 6
+    rank: 1
+
+  - network_id: polygon
+    address: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+    symbol: USDC
+    decimals: 6
+    rank: 2
+
+  - network_id: polygon
+    address: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619"
+    symbol: WETH
+    decimals: 18
+    rank: 3
+
+  - network_id: polygon
+    address: "0xD6DF932A45C0f255f85145f286eA0b292B21C90B"
+    symbol: AAVE
+    decimals: 18
+    rank: 4
+
+  - network_id: polygon
+    address: "0x53E0bca35eC356BD5ddDFebbD1Fc0fD03FaBad39"
+    symbol: LINK
+    decimals: 18
+    rank: 5
+
+# Политика маршрутов. Маршруты фиксированные: Monik не строит произвольные
+# multi-hop пути (01_PROJECT_REQUIREMENTS.md §15). Пустой allowed_pairs
+# означает «все кросс-провайдерные комбинации среди enabled провайдеров».
+routes:
+  allow_same_provider: false
+  allowed_pairs: []
+  max_route_steps: 4
+
+scanner:
+  base_network: polygon
+  base_token_address: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
+  # Суммы задаются только конфигурацией (01_PROJECT_REQUIREMENTS.md §22).
+  amounts: ["50", "100", "500", "1000"]
+
+  level1:
+    enabled: true
+    interval_seconds: 300         # production default — 5 минут
+    overlap_policy: skip
+    scan_timeout_seconds: 240
+    top_tokens: 30
+    max_opportunities_per_scan: 50
+    max_concurrent_requests: 8
+    quote_max_age_seconds: 30
+    opportunity_ttl_seconds: 120
+    deduplication_window_seconds: 300
+    allow_unknown_capability: true
+
+  level2:
+    enabled: true
+    max_parallel: 20              # CLAUDE.md §18
+    queue_capacity: 200
+    job_ttl_seconds: 120
+    confirmation_timeout_seconds: 60
+    max_attempts: 3
+    quote_max_age_seconds: 15
+
+profitability:
+  threshold_metric: net_roi
+  final_threshold_percent: "1.00"        # сравнение >=, ровно 1.00 % проходит
+  preliminary_threshold_percent: "1.00"
+
+fees:
+  enabled: true
+  refresh_on_startup: true
+  refresh_interval_days: 1
+  refresh_time: "02:00"
+  freshness_seconds: 86400
+  batch_enabled: true
+
+# Gas и цены подключаются независимыми реализациями Provider (решение D-4).
+gas:
+  enabled: true
+  # adapter_estimate — gas units из маршрута; rpc — цена газа из узла сети.
+  # static используется только как явно настроенный fallback.
+  sources: [adapter_estimate, rpc]
+  freshness_seconds: 60
+  request_timeout_seconds: 5.0
+  # static_wei_per_gas:
+  #   polygon: 120000000000
+
+prices:
+  enabled: true
+  sources: [aggregator_quote]
+  freshness_seconds: 300
+  request_timeout_seconds: 5.0
+
+resources:
+  global_max_concurrent_requests: 32
+  queue_capacity: 1000
+  queue_wait_timeout_seconds: 30.0
+  default_request_timeout_seconds: 10.0
+  lease_timeout_seconds: 60.0
+  deduplicate_in_flight: true
+  retry:
+    max_attempts: 3               # CLAUDE.md §32
+    initial_delay_seconds: 0.5
+    max_delay_seconds: 30.0
+    backoff_multiplier: 2.0
+    jitter_ratio: 0.2
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5
+    recovery_timeout_seconds: 30.0
+    half_open_max_calls: 1
+    success_threshold: 2
+
+scheduler:
+  enabled: true
+  tasks:
+    level1_scan:
+      mode: interval
+      interval_seconds: 300
+      overlap_policy: skip
+    fee_refresh:
+      mode: daily
+      time: "02:00"
+      timezone: "Europe/Lisbon"
+      interval_days: 1
+    capability_refresh:
+      mode: startup
+    cleanup:
+      mode: daily
+      time: "03:30"
+      timezone: "Europe/Lisbon"
+      interval_days: 1
+
+health:
+  enabled: true
+  check_interval_seconds: 60
+  provider_degraded_threshold: 2     # порог перехода в DEGRADED
+  provider_failure_threshold: 4      # порог перехода в UNAVAILABLE
+  provider_recovery_threshold: 2     # гистерезис: порог восстановления
+  worker_restart_limit: 3
+
+notifications:
+  enabled: false
+  mode: A                         # A | B — влияет только на правила отправки
+  language: ru
+  decimal_places: 6
+  queue_capacity: 500
+  max_attempts: 5
+  retry_initial_delay_seconds: 2.0
+  retry_max_delay_seconds: 300.0
+  deduplication_window_seconds: 3600
+  show_calculation_version: false  # версия формулы в тексте уведомления
+  # Режим влияет ТОЛЬКО на правила отправки и не меняет Level 1 / Level 2.
+  mode_a:
+    send_confirmed: true
+    send_partial: true
+  mode_b:
+    send_confirmed: true
+    send_partial: true
+  telegram:
+    enabled: false
+    bot_token: { env: "MONIK_TELEGRAM_BOT_TOKEN" }
+    chat_id: { env: "MONIK_TELEGRAM_CHAT_ID" }
+    api_base_url: "https://api.telegram.org"
+    request_timeout_seconds: 10.0
+    commands_enabled: true
+    poll_interval_seconds: 2.0
+
+database:
+  path: "data/monik.db"
+  wal_enabled: true
+  busy_timeout_seconds: 5.0
+  integrity_check_on_startup: true
+  cleanup_enabled: true
+  retention:
+    opportunities_days: 90
+    jobs_days: 30
+    notifications_days: 30
+    scans_days: 14
+    fee_snapshots_days: 30
+
+logging:
+  level: INFO
+  directory: logs
+  retention_days: 14
+
+metrics:
+  enabled: true
+  collection_interval_seconds: 60

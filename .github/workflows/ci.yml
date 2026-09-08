@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      UV_HTTP_TIMEOUT: "180"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install project
+        run: uv sync --python 3.12 --group dev
+
+      - name: Lint
+        run: .venv/bin/ruff check monik tests scripts conftest.py
+
+      - name: Format check
+        run: .venv/bin/ruff format --check monik tests scripts conftest.py
+
+      - name: Type check
+        run: .venv/bin/mypy monik
+
+      - name: Tests
+        run: .venv/bin/python -m pytest -m "not external"
