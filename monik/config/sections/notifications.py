@@ -10,7 +10,38 @@ from monik.config.base import ConfigSection
 from monik.config.secrets import SecretRef
 from monik.domain.enums.notifications import NotificationMode
 
-__all__ = ["NotificationConfig", "NotificationModeRules", "TelegramConfig"]
+__all__ = [
+    "NotificationConfig",
+    "NotificationModeRules",
+    "SystemNotificationConfig",
+    "TelegramConfig",
+]
+
+
+class SystemNotificationConfig(ConfigSection):
+    """Операционные уведомления о состоянии приложения.
+
+    Отдельная политика от уведомлений о возможностях: Notification System
+    доставляет только подтверждённые Opportunity
+    (``15_NOTIFICATION_SYSTEM.md`` §7), а состояние подсистем относится к
+    alerting (``28_OBSERVABILITY.md`` §59-65).
+
+    Пороговые значения и агрегация обязательны: одиночная transient ошибка
+    не должна порождать сообщение (``28_OBSERVABILITY.md`` §60), а сотня
+    одинаковых ошибок — сотню сообщений.
+    """
+
+    enabled: bool = True
+    #: Сообщение о завершении запуска после проверки готовности.
+    startup: bool = True
+    #: Сообщения об изменении состояния провайдеров и подсистем.
+    health: bool = True
+    #: Минимальная пауза между повторными сообщениями об одном и том же
+    #: незакрытом состоянии. Внутри паузы ошибки только накапливаются.
+    repeat_interval_seconds: int = Field(default=3600, ge=60, le=86_400)
+    #: Минимальная пауза между сообщениями о запуске. Защищает от спама
+    #: при crash loop: значение переживает рестарт.
+    startup_interval_seconds: int = Field(default=900, ge=0, le=86_400)
 
 
 class NotificationModeRules(ConfigSection):
@@ -80,6 +111,7 @@ class NotificationConfig(ConfigSection):
     mode_a: NotificationModeRules = NotificationModeRules()
     mode_b: NotificationModeRules = NotificationModeRules()
     telegram: TelegramConfig = TelegramConfig()
+    system: SystemNotificationConfig = SystemNotificationConfig()
 
     def rules_for(self, mode: NotificationMode) -> NotificationModeRules:
         """Правила отправки выбранного режима."""

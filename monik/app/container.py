@@ -27,6 +27,7 @@ from monik.domain.models.notification import NotificationDestination
 from monik.infrastructure.db import Database
 from monik.infrastructure.http import HttpClient, HttpxClient, UrlPolicy
 from monik.infrastructure.providers.contract import AggregatorAdapter
+from monik.infrastructure.providers.health_tracking import HealthTrackingAdapter
 from monik.infrastructure.providers.oneinch import OneInchAdapter
 from monik.infrastructure.providers.oneinch import endpoints as oneinch_endpoints
 from monik.infrastructure.providers.uniswap import UniswapAdapter
@@ -79,7 +80,11 @@ from monik.services.level2 import (
     Level2Worker,
     RouteVerifier,
 )
-from monik.services.notifications import MessageFormatter, NotificationDispatcher
+from monik.services.notifications import (
+    MessageFormatter,
+    NotificationDispatcher,
+    SystemNotifier,
+)
 from monik.services.observability import MetricsRegistry, TransitionRecorder
 from monik.services.observability.clock import Clock
 from monik.services.opportunity import OpportunityService
@@ -151,6 +156,7 @@ class Container:
     commands: CommandService | None = None
     telegram: TelegramNotificationAdapter | None = None
     formatter: MessageFormatter | None = None
+    system_notifier: SystemNotifier | None = None
 
     async def aclose(self) -> None:
         """Освободить внешние ресурсы."""
@@ -206,11 +212,18 @@ def build_container(
         return client
 
     resources = ResourceManager(config.resources, clock)
-    provider_adapters = (
+    built_adapters = (
         dict(adapters)
         if adapters is not None
         else _build_adapters(loaded, http_client=http_client, resources=resources, clock=clock)
     )
+    # Исход каждого обращения фиксируется Health Monitoring: без этого
+    # состояние провайдера навсегда осталось бы ``UNKNOWN``
+    # (``19_HEALTH_MONITORING.md`` §43).
+    provider_adapters: dict[ProviderId, AggregatorAdapter] = {
+        provider_id: HealthTrackingAdapter(adapter, health)
+        for provider_id, adapter in built_adapters.items()
+    }
 
     networks = NetworkRegistry(config)
     tokens = TokenRegistry(config)
@@ -307,6 +320,9 @@ def build_container(
         clock=clock,
         health=health,
     )
+    system_notifier = _build_system_notifier(
+        loaded, telegram=telegram, repositories=repositories, clock=clock
+    )
 
     return Container(
         configuration=config,
@@ -335,6 +351,7 @@ def build_container(
         commands=commands,
         telegram=telegram,
         formatter=formatter,
+        system_notifier=system_notifier,
     )
 
 
@@ -653,6 +670,34 @@ def _build_telegram(
     )
 
 
+def _build_system_notifier(
+    loaded: LoadedConfiguration,
+    *,
+    telegram: TelegramNotificationAdapter | None,
+    repositories: Repositories,
+    clock: Clock,
+) -> SystemNotifier | None:
+    """Канал операционных уведомлений, если Telegram настроен.
+
+    Используется тот же транспорт, что и для уведомлений о возможностях:
+    отдельного, неконтролируемого обращения к Telegram API подсистемы не
+    создают (``15_NOTIFICATION_SYSTEM.md`` §10, §29).
+    """
+    config = loaded.config.notifications
+    if telegram is None or not config.system.enabled:
+        return None
+    destinations = _destinations(loaded)
+    if not destinations:
+        return None
+    return SystemNotifier(
+        config.system,
+        transport=telegram,
+        destination=destinations[0],
+        clock=clock,
+        state=repositories.metadata,
+    )
+
+
 def _build_commands(
     loaded: LoadedConfiguration,
     *,
@@ -706,7 +751,14 @@ class _HealthStatusSource:
             for item in snapshot.components
         )
         providers = tuple(
-            ComponentStatus(name=f"provider:{item.provider_id.value}", state=item.status.value)
+            ComponentStatus(
+                name=f"provider:{item.provider_id.value}",
+                state=item.status.value,
+                # Код причины помогает понять, чем именно деградировал
+                # провайдер. Секретов он не содержит: это нормализованный
+                # код ошибки, а не тело ответа (``19`` §65).
+                detail=item.reason,
+            )
             for item in snapshot.providers
         )
         return (

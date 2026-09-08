@@ -14,11 +14,28 @@ import pytest
 
 from monik.config.secrets import SecretRef, SecretResolver, SecretValue
 from monik.config.sections.notifications import TelegramConfig
-from monik.domain.enums.notifications import DestinationKind
+from monik.domain.enums.health import ApplicationHealthStatus, ProviderHealthStatus
+from monik.domain.enums.notifications import (
+    DestinationKind,
+    StartupKind,
+    SystemAlertSeverity,
+)
+from monik.domain.enums.providers import ProviderId
+from monik.domain.models.health import (
+    ApplicationHealth,
+    ComponentHealth,
+    ProviderHealth,
+)
 from monik.domain.models.notification import NotificationDestination
 from monik.infrastructure.http import FakeHttpClient, HttpRequest, HttpResponse
 from monik.infrastructure.telegram import TelegramNotificationAdapter, bot_path
-from monik.services.notifications import OutgoingMessage
+from monik.services.notifications import OutgoingMessage, StartupSummary
+from monik.services.notifications.system_messages import (
+    aggregated_text,
+    recovery_text,
+    startup_text,
+    transition_text,
+)
 from monik.services.observability import FakeClock
 from monik.services.observability.logging import StructuredFormatter, get_logger
 from monik.services.observability.redaction import REDACTED, SecretRegistry
@@ -122,3 +139,59 @@ def test_notification_logger_does_not_emit_raw_urls() -> None:
     """Логгер подсистемы уведомлений использует общую редакцию."""
     logger = get_logger("services.notifications.dispatcher")
     assert logger.name.startswith("monik.")
+
+
+def test_system_notification_text_never_carries_credentials() -> None:
+    """Операционное уведомление не раскрывает secrets (``19`` §65).
+
+    В сообщение попадает только операционное состояние: версия, окружение,
+    сеть, состояние подсистем и нормализованные коды ошибок.
+    """
+    registry = SecretRegistry()
+    registry.register(BOT_TOKEN)
+    registry.register(CHAT_ID)
+    registry.register("test-provider-api-key-value")
+
+    health = ApplicationHealth(
+        status=ApplicationHealthStatus.DEGRADED,
+        observed_at=f.NOW,
+        components=(
+            ComponentHealth(
+                component="database",
+                status=ApplicationHealthStatus.HEALTHY,
+                observed_at=f.NOW,
+            ),
+        ),
+        providers=(
+            ProviderHealth(
+                provider_id=ProviderId.UNISWAP,
+                status=ProviderHealthStatus.UNAVAILABLE,
+                observed_at=f.NOW,
+                consecutive_failures=4,
+                reason="http_authentication_failed",
+            ),
+        ),
+    )
+    texts = [
+        startup_text(
+            StartupSummary(
+                kind=StartupKind.RESTART,
+                version="0.1.0",
+                environment="production",
+                network="polygon",
+                providers=("uniswap",),
+                health=health,
+            )
+        ),
+        transition_text(
+            "Провайдер uniswap",
+            "unavailable",
+            severity=SystemAlertSeverity.CRITICAL,
+            reason="http_authentication_failed",
+        ),
+        aggregated_text("Провайдер uniswap", "unavailable", errors=137),
+        recovery_text("Провайдер uniswap"),
+    ]
+    for text in texts:
+        assert not registry.contains(text), text
+        assert REDACTED not in text

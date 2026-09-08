@@ -46,10 +46,28 @@ providers:
     api_key: { env: "MONIK_VELORA_API_KEY" }
     supported_networks: [polygon]
 
+  # Trading API требует в каждом запросе публичный адрес swapper: от его
+  # имени строится и симулируется маршрут. Подпись, приватный ключ и
+  # выполнение свопа не используются — Monik остаётся потребителем
+  # котировок. Адрес обязан задать оператор: подставлять произвольный
+  # адрес нельзя, иначе котировка не будет достоверной.
+  #
+  # Дополнительные параметры options (все необязательные):
+  #   routing_preference          BEST_PRICE (по умолчанию) или FASTEST
+  #   slippage_tolerance_percent  постоянный допуск в процентах, например "0.5"
+  #   auto_slippage               "true" — допуск выбирает API
+  # Если параметры проскальзывания не заданы, отправляется
+  # autoSlippage: DEFAULT. Запрос без обоих механизмов API отклоняет.
   - provider_id: uniswap
     enabled: false
     api_key: { env: "MONIK_UNISWAP_API_KEY" }
     supported_networks: [polygon]
+    # Раскомментировать и указать реальный публичный адрес. Без него
+    # адаптер сообщает provider_swapper_not_configured и не отправляет
+    # запрос: подставлять адрес по умолчанию нельзя.
+    # options:
+    #   swapper: "0x..."
+    #   routing_preference: "BEST_PRICE"
 
 # Token universe. Authoritative metadata живёт в Token Registry, здесь
 # задаётся разрешённый набор. decimals указывается явно и не выводится
@@ -225,6 +243,17 @@ notifications:
     request_timeout_seconds: 10.0
     commands_enabled: true
     poll_interval_seconds: 2.0
+  # Операционные уведомления о самом Monik: запуск, деградация и
+  # восстановление провайдеров и подсистем. Отправляются тем же
+  # транспортом, но отдельно от уведомлений о возможностях.
+  # Одинаковые состояния не повторяются чаще repeat_interval_seconds:
+  # ошибки внутри паузы агрегируются в одно сообщение.
+  system:
+    enabled: true
+    startup: true
+    health: true
+    repeat_interval_seconds: 3600
+    startup_interval_seconds: 900   # защита от спама при crash loop
 
 database:
   path: "data/monik.db"

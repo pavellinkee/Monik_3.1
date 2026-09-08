@@ -13,7 +13,11 @@ from monik.config.sections.fees import (
 from monik.config.sections.health import HealthConfig
 from monik.config.sections.http import HttpConfig
 from monik.config.sections.networks import NetworkConfig
-from monik.config.sections.notifications import NotificationConfig, TelegramConfig
+from monik.config.sections.notifications import (
+    NotificationConfig,
+    SystemNotificationConfig,
+    TelegramConfig,
+)
 from monik.config.sections.observability import LoggingConfig, LogLevel, MetricsConfig
 from monik.config.sections.profitability import ProfitabilityConfig
 from monik.config.sections.providers import ProviderConfig
@@ -56,6 +60,7 @@ __all__ = [
     "RoutePolicyConfig",
     "ScannerConfig",
     "SchedulerConfig",
+    "SystemNotificationConfig",
     "TaskScheduleConfig",
     "TelegramConfig",
     "TokenConfig",

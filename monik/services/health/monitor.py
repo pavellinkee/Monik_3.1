@@ -117,6 +117,36 @@ class HealthMonitor:
             )
         )
 
+    def record_provider_probe(
+        self,
+        provider_id: ProviderId,
+        status: ProviderHealthStatus,
+        *,
+        reason: str | None = None,
+    ) -> ProviderHealth:
+        """Записать результат явной проверки провайдера (§38-39).
+
+        Probe — не единичная transient ошибка внутри рабочего запроса, а
+        отдельная проверка доступности, поэтому её результат применяется
+        сразу и не проходит через пороги гистерезиса: иначе неработающий
+        провайдер оставался бы после старта в состоянии ``UNKNOWN``
+        и приложение объявлялось бы здоровым (§69-70).
+
+        Capability Registry при этом не изменяется: health ≠ capability
+        (``19_HEALTH_MONITORING.md`` §55).
+        """
+        healthy = status is ProviderHealthStatus.HEALTHY
+        return self._store(
+            ProviderHealth(
+                provider_id=provider_id,
+                status=status,
+                observed_at=self._clock.now(),
+                consecutive_failures=0 if healthy else 1,
+                consecutive_successes=1 if healthy else 0,
+                reason=reason,
+            )
+        )
+
     def record_provider_failure(
         self, provider_id: ProviderId, *, reason: str | None = None
     ) -> ProviderHealth:

@@ -18,6 +18,7 @@ from tests.unit.providers.support import (
 from .adapter_contract import AdapterContractTests
 
 CLASSIC_PAYLOAD = {
+    "requestId": "11111111-2222-3333-4444-555555555555",
     "routing": "CLASSIC",
     "quote": {
         "output": {"amount": "5140000000000000000"},
@@ -26,11 +27,15 @@ CLASSIC_PAYLOAD = {
     },
 }
 
+#: Публичный адрес запроса. Trading API требует ``swapper`` в каждом
+#: запросе; значение тестовое и секретом не является.
+SWAPPER = "0x0000000000000000000000000000000000000A11"
+
 
 class TestUniswapContract(AdapterContractTests):
     def make_adapter(self, clock: FakeClock) -> AggregatorAdapter:
         return UniswapAdapter(
-            provider_config(ProviderId.UNISWAP),
+            provider_config(ProviderId.UNISWAP, options={"swapper": SWAPPER}),
             http=http_returning(CLASSIC_PAYLOAD),
             resources=resource_manager(clock),
             clock=clock,
@@ -42,7 +47,7 @@ class TestUniswapContract(AdapterContractTests):
 
     def make_failing_adapter(self, clock: FakeClock) -> AggregatorAdapter:
         return UniswapAdapter(
-            provider_config(ProviderId.UNISWAP),
+            provider_config(ProviderId.UNISWAP, options={"swapper": SWAPPER}),
             http=FakeHttpClient([ProviderError("upstream unavailable")] * 5),
             resources=resource_manager(clock),
             clock=clock,

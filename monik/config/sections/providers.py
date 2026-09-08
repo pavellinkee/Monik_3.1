@@ -31,6 +31,7 @@ class ProviderConfig(ConfigSection):
     max_concurrent_requests: int = Field(default=4, ge=1, le=128)
     requests_per_second: float = Field(default=5.0, gt=0, le=1000)
     allow_same_provider_round_trip: bool = False
+    options: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate(self) -> Self:
@@ -41,3 +42,18 @@ class ProviderConfig(ConfigSection):
                 f"provider {self.provider_id.value} is enabled but declares no supported networks"
             )
         return self
+
+    def option(self, name: str) -> str | None:
+        """Значение provider-specific параметра или ``None``.
+
+        Механизм общий, а смысл конкретного параметра знает только адаптер
+        соответствующего агрегатора: core не должен содержать
+        aggregator-specific настроек (``CLAUDE.md`` §7).
+
+        Секреты здесь не хранятся: для них существуют ``api_key`` и
+        ``SecretRef`` (``17_CONFIGURATION.md`` §26).
+        """
+        value = self.options.get(name)
+        if value is None:
+            return None
+        return value.strip() or None

@@ -54,3 +54,28 @@ class DeliveryErrorKind(DomainEnum):
             DeliveryErrorKind.PROVIDER_ERROR,
             DeliveryErrorKind.UNKNOWN_ERROR,
         }
+
+
+class StartupKind(DomainEnum):
+    """Как именно был запущен процесс.
+
+    Различие существенно для операционного уведомления: обычный
+    перезапуск и восстановление после аварии — разные события
+    (``19_HEALTH_MONITORING.md`` §69, §72). Предыдущее ``HEALTHY``
+    состояние безусловно актуальным не считается.
+    """
+
+    #: Первый запуск: сохранённого состояния прошлого запуска нет.
+    INITIAL = "initial"
+    #: Штатный перезапуск после корректной остановки.
+    RESTART = "restart"
+    #: Запуск после аварийного завершения предыдущего процесса.
+    CRASH_RECOVERY = "crash_recovery"
+
+
+class SystemAlertSeverity(DomainEnum):
+    """Важность операционного уведомления (``28_OBSERVABILITY.md`` §59)."""
+
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"

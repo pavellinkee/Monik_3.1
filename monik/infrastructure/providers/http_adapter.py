@@ -25,6 +25,7 @@ from monik.domain.value_objects.identifiers import CorrelationId, RequestId
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.http import HttpClient, HttpRequest, HttpResponse, classify_response
 from monik.services.observability.clock import Clock
+from monik.services.observability.redaction import REDACTED, redact_text
 from monik.services.resources import ResourceManager
 
 __all__ = ["HttpProviderAdapter"]
@@ -82,6 +83,31 @@ class HttpProviderAdapter:
         if self._api_key is None:
             return {}
         return {"Authorization": f"Bearer {self._api_key.get()}"}
+
+    def error_detail(self, response: HttpResponse) -> str | None:
+        """Provider-специфичная диагностика неуспешного ответа.
+
+        База ничего не знает о формате ошибок конкретного API и поэтому
+        ничего не извлекает. Адаптер, который умеет разбирать свой формат,
+        переопределяет метод и возвращает **уже отредактированный** текст
+        (см. :meth:`redact_provider_text`): сырое тело ответа и заголовки в
+        ошибку не попадают (``06_AGGREGATOR_ADAPTERS.md`` §14,
+        ``22_SECURITY.md``).
+        """
+        return None
+
+    def redact_provider_text(self, text: str) -> str:
+        """Скрыть секреты в тексте, полученном от провайдера.
+
+        Помимо общего реестра секретов вычёркивается ключ именно этого
+        адаптера: ответ API может процитировать переданный ключ, и такой
+        текст не должен попасть ни в ошибку, ни в лог, ни в уведомление
+        (``22_SECURITY.md``).
+        """
+        result = text
+        if self._api_key is not None:
+            result = result.replace(self._api_key.get(), REDACTED)
+        return redact_text(result)
 
     def require_credentials(self) -> SecretValue:
         """Убедиться, что credentials заданы."""
@@ -177,7 +203,11 @@ class HttpProviderAdapter:
                     timeout_seconds=effective_timeout.total_seconds(),
                 )
             )
-            classify_response(response, provider=self._provider_id.value)
+            classify_response(
+                response,
+                provider=self._provider_id.value,
+                detail=self.error_detail(response) if not response.is_success else None,
+            )
             return response
 
         return await self._resources.execute(resource_request, call)

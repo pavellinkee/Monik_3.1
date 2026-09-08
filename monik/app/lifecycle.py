@@ -23,17 +23,26 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import timedelta
 
+from monik import __version__
 from monik.app.container import Container, build_container
 from monik.app.recovery import RecoveryReport, RecoveryService
+from monik.app.startup_health import (
+    detect_startup_kind,
+    mark_running,
+    mark_stopped,
+    probe_providers,
+)
 from monik.app.supervisor import SupervisedWorker, Supervisor
 from monik.config.loader import LoadedConfiguration
 from monik.config.sections.scheduler import TaskScheduleConfig
 from monik.domain.enums.health import ApplicationHealthStatus, SupervisorState
+from monik.domain.enums.notifications import StartupKind
 from monik.domain.enums.providers import ProviderId
 from monik.domain.enums.resources import RequestPriority
 from monik.domain.enums.scheduler import TaskMode
 from monik.infrastructure.db import Database, MigrationRunner
 from monik.infrastructure.providers.contract import AggregatorAdapter
+from monik.services.notifications import StartupSummary
 from monik.services.observability import MetricsRegistry
 from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
@@ -43,6 +52,7 @@ __all__ = [
     "TASK_CAPABILITY_LOAD",
     "TASK_LEVEL1_SCAN",
     "TASK_NOTIFICATIONS",
+    "TASK_SYSTEM_HEALTH",
     "TASK_TELEGRAM_COMMANDS",
     "Application",
     "build_application",
@@ -56,6 +66,7 @@ TASK_LEVEL1_SCAN = "level1_scan"
 TASK_NOTIFICATIONS = "notification_delivery"
 TASK_TELEGRAM_COMMANDS = "telegram_commands"
 TASK_CAPABILITY_LOAD = "capability_load"
+TASK_SYSTEM_HEALTH = "system_health_notifications"
 
 #: Расписания по умолчанию. Пользовательская конфигурация имеет приоритет
 #: (``14_SCHEDULER.md`` §58-59).
@@ -64,6 +75,7 @@ _DEFAULT_SCHEDULES: dict[str, TaskScheduleConfig] = {
     TASK_NOTIFICATIONS: TaskScheduleConfig(mode=TaskMode.INTERVAL, interval_seconds=10),
     TASK_TELEGRAM_COMMANDS: TaskScheduleConfig(mode=TaskMode.INTERVAL, interval_seconds=5),
     TASK_CAPABILITY_LOAD: TaskScheduleConfig(mode=TaskMode.STARTUP),
+    TASK_SYSTEM_HEALTH: TaskScheduleConfig(mode=TaskMode.INTERVAL, interval_seconds=60),
 }
 
 
@@ -77,6 +89,7 @@ class Application:
     recovery: RecoveryService
     shutdown_timeout: timedelta = timedelta(seconds=30)
     recovery_report: RecoveryReport | None = None
+    startup_kind: StartupKind | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def startup(self) -> RecoveryReport:
@@ -85,8 +98,15 @@ class Application:
         База уже открыта и мигрирована (шаги 2-4 выполняет
         :func:`create_application`), поэтому здесь восстанавливается
         состояние и инициализируются подсистемы.
+
+        Операционное уведомление отправляется последним шагом — после
+        проверки подсистем и доступности провайдеров: до неё объявлять
+        запуск успешным нельзя (``19_HEALTH_MONITORING.md`` §69-70).
         """
         health = self.container.health
+        state = self.container.repositories.metadata
+        self.startup_kind = await detect_startup_kind(state)
+
         health.set_component("configuration", ApplicationHealthStatus.HEALTHY)
         health.set_component("database", ApplicationHealthStatus.HEALTHY)
 
@@ -102,7 +122,18 @@ class Application:
 
         for component in ("level1", "level2", "fees", "calculator", "notifications"):
             health.set_component(component, ApplicationHealthStatus.HEALTHY)
-        _LOGGER.info("startup complete", extra=log_fields(recovered=report.total))
+
+        await probe_providers(self.container.adapters, health=health)
+        await mark_running(state, now=self.container.clock.now())
+        await self._notify_startup(report)
+        _LOGGER.info(
+            "startup complete",
+            extra=log_fields(
+                recovered=report.total,
+                startup_kind=self.startup_kind.value,
+                status=health.application_health().status.value,
+            ),
+        )
         return report
 
     async def run(self) -> SupervisorState:
@@ -120,6 +151,8 @@ class Application:
     async def shutdown(self) -> None:
         """Graceful shutdown: новые циклы не создаются (``14`` §49)."""
         self.request_stop()
+        self.container.health.mark_stopping()
+        await mark_stopped(self.container.repositories.metadata, now=self.container.clock.now())
         await self.scheduler.shutdown()
         await self.container.level2_worker.cancel_all()
         try:
@@ -129,6 +162,26 @@ class Application:
         except TimeoutError:
             _LOGGER.warning("shutdown timed out; workers were cancelled")
         await self.container.aclose()
+
+    async def _notify_startup(self, report: RecoveryReport) -> None:
+        """Отправить итоговое сообщение о запуске, если канал настроен."""
+        notifier = self.container.system_notifier
+        if notifier is None or self.startup_kind is None:
+            return
+        config = self.container.configuration
+        await notifier.notify_startup(
+            StartupSummary(
+                kind=self.startup_kind,
+                version=__version__,
+                environment=config.application.environment.value,
+                network=str(config.scanner.base_network),
+                providers=tuple(
+                    provider.provider_id.value for provider in config.enabled_providers
+                ),
+                health=self.container.health.application_health(),
+                recovered=report.total,
+            )
+        )
 
     async def _scheduler_loop(self) -> None:
         """Периодически выполнять готовые задачи планировщика.
@@ -185,6 +238,17 @@ def build_application(
         config=config.scheduler,
         default=_DEFAULT_SCHEDULES[TASK_NOTIFICATIONS],
     )
+    if container.system_notifier is not None:
+        registry.register(
+            TASK_SYSTEM_HEALTH,
+            _system_health_task(container),
+            config=config.scheduler,
+            default=TaskScheduleConfig(
+                mode=TaskMode.INTERVAL,
+                interval_seconds=config.health.check_interval_seconds,
+            ),
+            priority=RequestPriority.BACKGROUND,
+        )
     if container.commands is not None:
         registry.register(
             TASK_TELEGRAM_COMMANDS,
@@ -252,8 +316,20 @@ def _capability_task(container: Container) -> TaskHandler:
 
 
 def _level1_task(container: Container) -> TaskHandler:
+    """Цикл сканирования Level 1.
+
+    После цикла обновляется отметка времени последнего скана: она нужна
+    команде ``/status``. Само состояние подсистемы при этом не меняется,
+    поэтому успешные сканы не порождают уведомлений.
+    """
+
     async def run() -> None:
         await container.level1.scan()
+        container.health.set_component(
+            "level1",
+            ApplicationHealthStatus.HEALTHY,
+            reason=f"последний цикл {container.clock.now().isoformat(timespec='seconds')}",
+        )
 
     return run
 
@@ -261,6 +337,21 @@ def _level1_task(container: Container) -> TaskHandler:
 def _notification_task(container: Container) -> TaskHandler:
     async def run() -> None:
         await container.notifications.dispatch_pending()
+
+    return run
+
+
+def _system_health_task(container: Container) -> TaskHandler:
+    """Операционные уведомления об изменениях состояния.
+
+    Дополнительных запросов к провайдерам задача не делает: она читает
+    снимок Health Monitoring, который наполняется исходами обычных
+    обращений (``19_HEALTH_MONITORING.md`` §43-44).
+    """
+
+    async def run() -> None:
+        if container.system_notifier is not None:
+            await container.system_notifier.notify_health(container.health.application_health())
 
     return run
 

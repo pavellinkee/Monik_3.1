@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from monik.app.container import Container
 from monik.app.lifecycle import Application, create_application
 from monik.config import LoadedConfiguration, parse_configuration
 from monik.domain.enums.lifecycle import (
@@ -35,6 +36,7 @@ from monik.domain.errors import TimeoutError as MonikTimeoutError
 from monik.infrastructure.db import Database
 from monik.infrastructure.providers.contract import AggregatorAdapter, QuoteRequest
 from monik.infrastructure.providers.fake import FakeAdapter
+from monik.infrastructure.providers.health_tracking import HealthTrackingAdapter
 from monik.infrastructure.telegram import FakeTransport
 from monik.services.notifications import DeliveryReceipt, NotificationDispatcher
 from monik.services.observability import FakeClock
@@ -69,6 +71,18 @@ def scenario_document(*, telegram: bool = False, **overrides: Any) -> dict[str, 
         }
     document.update(overrides)
     return document
+
+
+def fake_adapters(container: Container) -> list[FakeAdapter]:
+    """Тестовые адаптеры контейнера.
+
+    Composition root оборачивает каждый адаптер наблюдателем health, поэтому
+    до тестовой реализации нужно дойти через :attr:`wrapped`.
+    """
+    return [
+        adapter.wrapped if isinstance(adapter, HealthTrackingAdapter) else adapter  # type: ignore[misc]
+        for adapter in container.adapters.values()
+    ]
 
 
 def adapters_from(
@@ -261,11 +275,14 @@ async def test_route_unavailable_is_not_unprofitable(
         await started.container.level2_worker.drain()
 
         # Провайдер перестал воспроизводить исходный маршрут.
-        started.container.adapters[ProviderId.ONEINCH] = FakeAdapter(
-            ProviderId.ONEINCH,
-            clock,
-            output_rule=arbitrage_rule("0.050", "20.00"),
-            fixed_route_outcome=RouteValidationOutcome.MISMATCH,
+        started.container.adapters[ProviderId.ONEINCH] = HealthTrackingAdapter(
+            FakeAdapter(
+                ProviderId.ONEINCH,
+                clock,
+                output_rule=arbitrage_rule("0.050", "20.00"),
+                fixed_route_outcome=RouteValidationOutcome.MISMATCH,
+            ),
+            started.container.health,
         )
         confirmation = await started.container.level2.confirm(
             await started.container.repositories.jobs.get(job.k_id)  # type: ignore[arg-type]
@@ -441,8 +458,8 @@ async def test_scan_covers_every_configured_amount(
 
         buys = [
             call
-            for adapter in started.container.adapters.values()
-            for call in adapter.quote_calls  # type: ignore[attr-defined]
+            for adapter in fake_adapters(started.container)
+            for call in adapter.quote_calls
             if call.operation is OperationType.BUY
         ]
         amounts = {call.input_amount.as_decimal for call in buys}
@@ -456,8 +473,6 @@ async def test_quote_requests_never_bypass_the_adapter(scenario: Scenario) -> No
     """Все котировки получены через адаптеры (``CLAUDE.md`` §14)."""
     await scenario.container.level1.scan()
 
-    calls = [
-        call for adapter in scenario.container.adapters.values() for call in adapter.quote_calls
-    ]
+    calls = [call for adapter in fake_adapters(scenario.container) for call in adapter.quote_calls]
     assert calls
     assert all(isinstance(call, QuoteRequest) for call in calls)

@@ -161,19 +161,26 @@ class HttpxClient:
         await self._client.aclose()
 
 
-def classify_response(response: HttpResponse, *, provider: str | None = None) -> None:
+def classify_response(
+    response: HttpResponse, *, provider: str | None = None, detail: str | None = None
+) -> None:
     """Превратить неуспешный HTTP-статус в нормализованную ошибку.
 
     Различие категорий обязательно: 429 и 5xx — временные состояния,
     401/403 — ошибка конфигурации credentials, 4xx — ошибка запроса
     (``06_AGGREGATOR_ADAPTERS.md`` §11-12).
+
+    ``detail`` — уже отредактированное provider-специфичное пояснение,
+    подготовленное адаптером. Тело ответа сюда целиком не попадает: клиент
+    не знает, какие поля конкретного API безопасно показывать
+    (``22_SECURITY.md``).
     """
     if response.is_success:
         return
     status = response.status_code
     if status == 429:
         raise RateLimitError(
-            "provider rate limit reached",
+            _with_detail("provider rate limit reached", detail),
             code="http_rate_limited",
             http_status=status,
             provider_code=provider,
@@ -182,6 +189,8 @@ def classify_response(response: HttpResponse, *, provider: str | None = None) ->
         )
     if status in {401, 403}:
         raise AuthenticationError(
+            # Диагностика ошибки аутентификации не добавляется: ответ на
+            # отклонённые credentials может содержать сам ключ.
             "provider rejected the credentials",
             code="http_authentication_failed",
             http_status=status,
@@ -190,19 +199,29 @@ def classify_response(response: HttpResponse, *, provider: str | None = None) ->
         )
     if 500 <= status < 600:
         raise ProviderError(
-            f"provider returned server error {status}",
+            _with_detail(f"provider returned server error {status}", detail),
             code="http_server_error",
             http_status=status,
             provider_code=provider,
             request_id=response.request_id,
         )
     raise DataError(
-        f"provider rejected the request with status {status}",
+        _with_detail(f"provider rejected the request with status {status}", detail),
         code="http_client_error",
         http_status=status,
         provider_code=provider,
         request_id=response.request_id,
     )
+
+
+def _with_detail(message: str, detail: str | None) -> str:
+    """Дополнить сообщение пояснением провайдера, если оно есть."""
+    if detail is None:
+        return message
+    trimmed = detail.strip()
+    if not trimmed:
+        return message
+    return f"{message}: {trimmed}"
 
 
 def _parse_retry_after(response: HttpResponse) -> timedelta | None:
